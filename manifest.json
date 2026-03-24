@@ -1,0 +1,10 @@
+{
+  "id": "excoms-wic",
+  "name": "ExComS W.I.C — Writing Intelligence Companion",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Analyse your writings and map the neural landscape of your mind. Discover emotional patterns, philosophical leanings, and cognitive tendencies.",
+  "author": "ExComS Innovation Center",
+  "authorUrl": "https://excoms.ai",
+  "isDesktopOnly": false
+}
