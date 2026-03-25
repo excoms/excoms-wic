@@ -1,6 +1,6 @@
 {
   "name": "excoms-wic",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "ExComS Writing Intelligence Companion",
   "main": "main.js",
   "scripts": {

@@ -6,25 +6,36 @@ const WIC_DATA_FILE = 'wic-data.json';
 const D3_CDN_URL = 'https://d3js.org/d3.v7.min.js';
 
 const DEFAULT_DIMENSIONS = [
-  { id: 'EMO_Love', category: 'EMO', label: 'Love' },
-  { id: 'EMO_Longing', category: 'EMO', label: 'Longing' },
-  { id: 'EMO_Anxiety', category: 'EMO', label: 'Anxiety' },
-  { id: 'EMO_Wonder', category: 'EMO', label: 'Wonder' },
-  { id: 'EMO_Peace', category: 'EMO', label: 'Peace' },
-  { id: 'EMO_Grief', category: 'EMO', label: 'Grief' },
-  { id: 'EMO_Gratitude', category: 'EMO', label: 'Gratitude' },
-  { id: 'PHIL_Sufism', category: 'PHIL', label: 'Sufism' },
-  { id: 'PHIL_Existentialism', category: 'PHIL', label: 'Existentialism' },
-  { id: 'PHIL_Buddhism', category: 'PHIL', label: 'Buddhism' },
-  { id: 'PHIL_Stoicism', category: 'PHIL', label: 'Stoicism' },
-  { id: 'COG_Metaphorical', category: 'COG', label: 'Metaphorical' },
-  { id: 'COG_Abstract', category: 'COG', label: 'Abstract' },
-  { id: 'COG_Paradoxical', category: 'COG', label: 'Paradoxical' },
-  { id: 'PERS_Openness', category: 'PERS', label: 'Openness' },
-  { id: 'PERS_Creativity', category: 'PERS', label: 'Creativity' },
-  { id: 'BRAIN_DMN', category: 'BRAIN', label: 'Default Mode Network' },
-  { id: 'BRAIN_Amygdala', category: 'BRAIN', label: 'Amygdala' },
+  { id: 'EMO_Love', category: 'EMO', label: 'Love', module: 'MOD_CORE' },
+  { id: 'EMO_Longing', category: 'EMO', label: 'Longing', module: 'MOD_CORE' },
+  { id: 'EMO_Anxiety', category: 'EMO', label: 'Anxiety', module: 'MOD_CORE' },
+  { id: 'EMO_Wonder', category: 'EMO', label: 'Wonder', module: 'MOD_CORE' },
+  { id: 'EMO_Peace', category: 'EMO', label: 'Peace', module: 'MOD_CORE' },
+  { id: 'EMO_Grief', category: 'EMO', label: 'Grief', module: 'MOD_CORE' },
+  { id: 'EMO_Gratitude', category: 'EMO', label: 'Gratitude', module: 'MOD_CORE' },
+  { id: 'PHIL_Sufism', category: 'PHIL', label: 'Sufism', module: 'MOD_CORE' },
+  { id: 'PHIL_Existentialism', category: 'PHIL', label: 'Existentialism', module: 'MOD_CORE' },
+  { id: 'PHIL_Buddhism', category: 'PHIL', label: 'Buddhism', module: 'MOD_CORE' },
+  { id: 'PHIL_Stoicism', category: 'PHIL', label: 'Stoicism', module: 'MOD_CORE' },
+  { id: 'COG_Metaphorical', category: 'COG', label: 'Metaphorical', module: 'MOD_CORE' },
+  { id: 'COG_Abstract', category: 'COG', label: 'Abstract', module: 'MOD_CORE' },
+  { id: 'COG_Paradoxical', category: 'COG', label: 'Paradoxical', module: 'MOD_CORE' },
+  { id: 'PERS_Openness', category: 'PERS', label: 'Openness', module: 'MOD_CORE' },
+  { id: 'PERS_Creativity', category: 'PERS', label: 'Creativity', module: 'MOD_CORE' },
+  { id: 'BRAIN_DMN', category: 'BRAIN', label: 'Default Mode Network', module: 'MOD_CORE' },
+  { id: 'BRAIN_Amygdala', category: 'BRAIN', label: 'Amygdala', module: 'MOD_CORE' },
 ];
+
+const WORD_LIMITS: Record<string, number> = {
+  trial: 2000,
+  free: 500,
+  pro: 2000,
+  gold: 5000,
+};
+
+const FREE_MONTHLY_LIMIT = 5;
+const TRIAL_SOFT_CAP = 100;
+const TRIAL_DAYS = 30;
 
 const CAT_COLORS: Record<string, string> = {
   EMO: '#D85A30',
@@ -38,6 +49,7 @@ interface Dimension {
   id: string;
   category: string;
   label: string;
+  module?: string;
 }
 
 interface ScoreEntry {
@@ -52,6 +64,12 @@ interface ScoreEntry {
 interface WICData {
   entries: ScoreEntry[];
   dimensions: Dimension[];
+  activeModules: string[];
+  trialStartDate: number;
+  trialWritingCount: number;
+  tier: string;
+  monthlyWritingCount: number;
+  monthlyResetDate: number;
 }
 
 interface WICSettings {
@@ -116,6 +134,34 @@ class WICView extends ItemView {
       banner.setText('✦ New dimension detected: ' + this.newDimensions.join(', ') + ' — added to your network');
     }
 
+    // Tier warning banners
+    const data = this.plugin.wicData;
+    if (data.tier === 'trial') {
+      const daysElapsed = this.plugin.getTrialDaysElapsed();
+      const writings = data.trialWritingCount;
+
+      if (daysElapsed >= TRIAL_DAYS + 1) {
+        container.createDiv({ cls: 'wic-tier-banner wic-tier-red', text: 'Trial expired — upgrade to continue with full access' });
+      } else if (daysElapsed >= TRIAL_DAYS) {
+        container.createDiv({ cls: 'wic-tier-banner wic-tier-red', text: 'Your trial period ends today' });
+      } else if (daysElapsed >= TRIAL_DAYS - 5 && daysElapsed < TRIAL_DAYS) {
+        container.createDiv({ cls: 'wic-tier-banner wic-tier-amber', text: (TRIAL_DAYS - daysElapsed) + ' days left in your trial' });
+      }
+
+      if (writings >= TRIAL_SOFT_CAP) {
+        container.createDiv({ cls: 'wic-tier-banner wic-tier-red', text: 'Trial analysis limit reached — ' + writings + ' of ' + TRIAL_SOFT_CAP });
+      } else if (writings >= 80) {
+        container.createDiv({ cls: 'wic-tier-banner wic-tier-amber', text: 'You\'ve used ' + writings + ' of ' + TRIAL_SOFT_CAP + ' trial analyses' });
+      }
+    } else if (data.tier === 'free') {
+      this.plugin.checkMonthlyReset();
+      if (data.monthlyWritingCount >= FREE_MONTHLY_LIMIT) {
+        container.createDiv({ cls: 'wic-tier-banner wic-tier-red', text: 'Free tier limit reached — ' + FREE_MONTHLY_LIMIT + ' analyses per month' });
+      } else if (data.monthlyWritingCount >= FREE_MONTHLY_LIMIT - 1) {
+        container.createDiv({ cls: 'wic-tier-banner wic-tier-amber', text: (FREE_MONTHLY_LIMIT - data.monthlyWritingCount) + ' analysis remaining this month' });
+      }
+    }
+
     const btn = container.createEl('button', {
       cls: 'wic-analyse-btn',
       text: this.isLoading ? 'Analysing...' : 'Analyse this note',
@@ -152,8 +198,10 @@ class WICView extends ItemView {
         const score = this.currentScores[dim.id] || 0;
         const trend = getTrend(this.plugin.wicData.entries, dim.id);
         const isNew = this.newDimensions.includes(dim.id);
+        const locked = this.plugin.isDimensionLocked(dim);
 
         const dimDiv = catDiv.createDiv('wic-dimension');
+        if (locked) dimDiv.addClass('wic-dim-locked');
         const row = dimDiv.createDiv('wic-dim-row');
 
         const nameSpan = row.createSpan({ cls: 'wic-dim-name', text: dim.label });
@@ -633,7 +681,7 @@ class WICNetworkView extends ItemView {
 
 export default class WICPlugin extends Plugin {
   settings: WICSettings;
-  wicData: WICData = { entries: [], dimensions: [] };
+  wicData: WICData = { entries: [], dimensions: [], activeModules: ['MOD_CORE'], trialStartDate: 0, trialWritingCount: 0, tier: 'trial', monthlyWritingCount: 0, monthlyResetDate: 0 };
 
   async onload() {
     await this.loadSettings();
@@ -707,6 +755,45 @@ export default class WICPlugin extends Plugin {
     workspace.revealLeaf(leaf);
   }
 
+  getTrialDaysElapsed(): number {
+    if (this.wicData.trialStartDate === 0) return 0;
+    return Math.floor((Date.now() - this.wicData.trialStartDate) / (1000 * 60 * 60 * 24));
+  }
+
+  isTrialExpired(): boolean {
+    return this.wicData.tier === 'trial' && this.getTrialDaysElapsed() > TRIAL_DAYS;
+  }
+
+  isTrialCapReached(): boolean {
+    return this.wicData.tier === 'trial' && this.wicData.trialWritingCount >= TRIAL_SOFT_CAP;
+  }
+
+  isDimensionLocked(dim: Dimension): boolean {
+    if (this.wicData.tier === 'pro' || this.wicData.tier === 'gold') return false;
+    const module = dim.module || 'MOD_CORE';
+    if (module === 'MOD_CORE') return false;
+    // Non-core modules locked if trial expired or cap reached
+    return this.isTrialExpired() || this.isTrialCapReached();
+  }
+
+  checkMonthlyReset() {
+    const now = new Date();
+    const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    if (this.wicData.monthlyResetDate < firstOfMonth) {
+      this.wicData.monthlyWritingCount = 0;
+      this.wicData.monthlyResetDate = firstOfMonth;
+    }
+  }
+
+  enforceWordLimit(content: string): { text: string; wordCount: number; wasTruncated: boolean } {
+    const words = content.trim().split(/\s+/);
+    const wordCount = words.length;
+    const limit = WORD_LIMITS[this.wicData.tier] || WORD_LIMITS.trial;
+    if (wordCount <= limit) return { text: content, wordCount, wasTruncated: false };
+    const truncated = words.slice(0, limit).join(' ');
+    return { text: truncated, wordCount, wasTruncated: true };
+  }
+
   async analyseActiveNote() {
     if (!this.settings.apiKey) { new Notice('Please add your OpenAI API key in W.I.C settings'); return; }
 
@@ -742,12 +829,33 @@ export default class WICPlugin extends Plugin {
       return;
     }
 
+    // Free tier monthly limit check
+    if (this.wicData.tier === 'free') {
+      this.checkMonthlyReset();
+      if (this.wicData.monthlyWritingCount >= FREE_MONTHLY_LIMIT) {
+        new Notice('Free tier limit reached — ' + FREE_MONTHLY_LIMIT + ' analyses per month. Upgrade for unlimited.');
+        return;
+      }
+    }
+
+    // Word count enforcement
+    const limit = WORD_LIMITS[this.wicData.tier] || WORD_LIMITS.trial;
+    const { text: analysisContent, wordCount, wasTruncated } = this.enforceWordLimit(content);
+    if (wasTruncated) {
+      new Notice('Your note has ' + wordCount + ' words — limit is ' + limit + '. Analysing the first ' + limit + ' words.');
+    }
+
+    // Trial start tracking
+    if (this.wicData.tier === 'trial' && this.wicData.trialStartDate === 0) {
+      this.wicData.trialStartDate = Date.now();
+    }
+
     const wicView = this.getWICView();
     if (wicView && typeof wicView.setLoading === 'function') wicView.setLoading(true);
     new Notice('W.I.C is analysing your writing...');
 
     try {
-      const scores = await this.callOpenAI(content, title);
+      const scores = await this.callOpenAI(analysisContent, title);
       const newDims = this.detectNewDimensions(scores);
 
       const entry: ScoreEntry = {
@@ -759,6 +867,15 @@ export default class WICPlugin extends Plugin {
       };
 
       this.wicData.entries.push(entry);
+
+      // Tier tracking increments
+      if (this.wicData.tier === 'trial') {
+        this.wicData.trialWritingCount++;
+      }
+      if (this.wicData.tier === 'free') {
+        this.wicData.monthlyWritingCount++;
+      }
+
       await this.saveWICData();
 
       if (wicView) wicView.setScores(title, scores, newDims);
@@ -767,6 +884,11 @@ export default class WICPlugin extends Plugin {
         new Notice('✦ New dimension detected: ' + newDims.join(', '));
       } else {
         new Notice('Analysis complete');
+      }
+
+      // Post-analysis trial warnings
+      if (this.wicData.tier === 'trial' && this.wicData.trialWritingCount === TRIAL_SOFT_CAP) {
+        new Notice('You\'ve reached ' + TRIAL_SOFT_CAP + ' analyses — explore Pro for unlimited access');
       }
     } catch (err: any) {
       const wicViewErr = this.getWICView();
@@ -786,7 +908,7 @@ export default class WICPlugin extends Plugin {
       'Only score 8-10 for dimensions that are unmistakably dominant.\n\n' +
       'Dimensions to score:\n' + dimList + '\n\n' +
       'Writing title: "' + title + '"\n' +
-      'Writing content:\n---\n' + content.slice(0, 3000) + '\n---\n\n' +
+      'Writing content:\n---\n' + content + '\n---\n\n' +
       'Respond with ONLY a valid JSON object like this example:\n' +
       '{"EMO_Love": 7.2, "EMO_Longing": 5.1, "PHIL_Sufism": 8.4}\n\n' +
       'Include ALL dimensions in the response, even if scored 0.\n' +
@@ -873,10 +995,20 @@ export default class WICPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(WIC_DATA_FILE);
       if (file instanceof TFile) {
         const raw = await this.app.vault.read(file);
-        this.wicData = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        this.wicData = {
+          entries: parsed.entries || [],
+          dimensions: parsed.dimensions || [],
+          activeModules: parsed.activeModules || ['MOD_CORE'],
+          trialStartDate: parsed.trialStartDate || 0,
+          trialWritingCount: parsed.trialWritingCount || 0,
+          tier: parsed.tier || 'trial',
+          monthlyWritingCount: parsed.monthlyWritingCount || 0,
+          monthlyResetDate: parsed.monthlyResetDate || 0,
+        };
       }
     } catch {
-      this.wicData = { entries: [], dimensions: [] };
+      this.wicData = { entries: [], dimensions: [], activeModules: ['MOD_CORE'], trialStartDate: 0, trialWritingCount: 0, tier: 'trial', monthlyWritingCount: 0, monthlyResetDate: 0 };
     }
   }
 
@@ -1043,6 +1175,12 @@ class WICSettingTab extends PluginSettingTab {
                 const filename = await this.plugin.exportWICData();
                 this.plugin.wicData.entries = [];
                 this.plugin.wicData.dimensions = [];
+                this.plugin.wicData.trialStartDate = 0;
+                this.plugin.wicData.trialWritingCount = 0;
+                this.plugin.wicData.tier = 'trial';
+                this.plugin.wicData.monthlyWritingCount = 0;
+                this.plugin.wicData.monthlyResetDate = 0;
+                this.plugin.wicData.activeModules = ['MOD_CORE'];
                 await this.plugin.saveWICData();
                 this.plugin.settings.dimensions = [...DEFAULT_DIMENSIONS];
                 await this.plugin.saveSettings();
