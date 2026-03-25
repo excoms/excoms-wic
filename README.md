@@ -4,6 +4,8 @@
 
 ExComS W.I.C is an Obsidian plugin that analyses your notes, diary entries, and poems using AI — and maps the neural landscape of your mind. Discover your emotional patterns, philosophical leanings, and cognitive tendencies through the words you already write.
 
+![The W.I.C network view — dimensions sized by score, coloured by category](images/network-view.png)
+
 ## What it does
 
 - **Analyses any note** with one click using OpenAI
@@ -21,6 +23,8 @@ ExComS W.I.C is an Obsidian plugin that analyses your notes, diary entries, and 
 2. Click the **brain icon** in the left ribbon to open the W.I.C panel
 3. Click **Analyse this note**
 4. Your dimension scores appear instantly in the sidebar
+
+![The W.I.C sidebar — scores with trend arrows across all dimensions](images/sidebar-panel.png)
 
 ## Network view
 
