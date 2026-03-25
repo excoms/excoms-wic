@@ -1,7 +1,9 @@
-import { App, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, TFile } from 'obsidian';
+import { App, Modal, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, TFile } from 'obsidian';
 
 const WIC_VIEW_TYPE = 'wic-panel';
+const WIC_NETWORK_VIEW_TYPE = 'wic-network';
 const WIC_DATA_FILE = 'wic-data.json';
+const D3_CDN_URL = 'https://d3js.org/d3.v7.min.js';
 
 const DEFAULT_DIMENSIONS = [
   { id: 'EMO_Love', category: 'EMO', label: 'Love' },
@@ -44,6 +46,7 @@ interface ScoreEntry {
   timestamp: number;
   scores: Record<string, number>;
   newDimensions: string[];
+  excluded?: boolean;
 }
 
 interface WICData {
@@ -62,6 +65,13 @@ const DEFAULT_SETTINGS: WICSettings = {
   model: 'gpt-4o-mini',
   dimensions: DEFAULT_DIMENSIONS,
 };
+
+function displayName(entry: ScoreEntry): string {
+  if (entry.notePath) {
+    return entry.notePath.replace(/\.md$/i, '').replace(/^.*\//, '');
+  }
+  return entry.noteTitle || 'Untitled';
+}
 
 function getTrend(entries: ScoreEntry[], dimId: string): 'up' | 'down' | 'stable' | 'none' {
   const relevant = entries.filter(e => e.scores[dimId] !== undefined).slice(-5);
@@ -171,6 +181,24 @@ class WICView extends ItemView {
         fill.style.background = CAT_COLORS[cat] || '#888';
       });
     });
+
+    // Include in network toggle for the current note
+    const currentEntry = this.plugin.wicData.entries
+      .filter(e => e.noteTitle === this.currentTitle)
+      .sort((a, b) => b.timestamp - a.timestamp)[0];
+    if (currentEntry) {
+      const toggleRow = container.createDiv('wic-include-toggle');
+      const cb = toggleRow.createEl('input') as HTMLInputElement;
+      cb.type = 'checkbox';
+      cb.checked = !currentEntry.excluded;
+      cb.id = 'wic-include-cb';
+      const label = toggleRow.createEl('label', { text: 'Include in network' });
+      label.setAttribute('for', 'wic-include-cb');
+      cb.onchange = async () => {
+        currentEntry.excluded = !cb.checked;
+        await this.plugin.saveWICData();
+      };
+    }
   }
 
   setLoading(loading: boolean) {
@@ -187,6 +215,422 @@ class WICView extends ItemView {
   }
 }
 
+class WICNetworkView extends ItemView {
+  plugin: WICPlugin;
+  d3: any = null;
+  simulation: any = null;
+  activeFilters: Set<string> = new Set();
+  selectedNode: string | null = null;
+  timeRange: [number, number] = [0, Date.now()];
+
+  constructor(leaf: WorkspaceLeaf, plugin: WICPlugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+
+  getViewType(): string { return WIC_NETWORK_VIEW_TYPE; }
+  getDisplayText(): string { return 'W.I.C Network'; }
+  getIcon(): string { return 'git-fork'; }
+
+  async onOpen() {
+    const container = this.containerEl.children[1] as HTMLElement;
+    container.empty();
+    container.addClass('wic-net-container');
+    container.createDiv({ cls: 'wic-net-loading', text: 'Loading visualisation...' });
+    await this.loadD3();
+    this.render();
+  }
+
+  async onClose() {
+    if (this.simulation) this.simulation.stop();
+  }
+
+  async loadD3(): Promise<void> {
+    if ((window as any).d3) { this.d3 = (window as any).d3; return; }
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = D3_CDN_URL;
+      script.onload = () => { this.d3 = (window as any).d3; resolve(); };
+      script.onerror = () => reject(new Error('Failed to load D3.js'));
+      document.head.appendChild(script);
+    });
+  }
+
+  getFilteredEntries(): ScoreEntry[] {
+    return this.plugin.wicData.entries.filter(e =>
+      !e.excluded && e.timestamp >= this.timeRange[0] && e.timestamp <= this.timeRange[1]
+    );
+  }
+
+  getActiveNodes(): { dim: Dimension; avgScore: number }[] {
+    const entries = this.getFilteredEntries();
+    if (entries.length === 0) return [];
+
+    return this.plugin.settings.dimensions
+      .map(dim => {
+        const scores = entries.map(e => e.scores[dim.id]).filter(s => s !== undefined);
+        const maxScore = scores.length > 0 ? Math.max(...scores) : 0;
+        const avgScore = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+        return { dim, avgScore, maxScore };
+      })
+      .filter(n => n.maxScore > 2.0)
+      .filter(n => this.activeFilters.size === 0 || this.activeFilters.has(n.dim.category));
+  }
+
+  getEdges(nodeIds: Set<string>): { source: string; target: string; strength: number }[] {
+    const entries = this.getFilteredEntries();
+    if (entries.length < 1) return [];
+
+    const coOccurrence: Record<string, number> = {};
+    const ids = [...nodeIds];
+
+    entries.forEach(entry => {
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const a = entry.scores[ids[i]];
+          const b = entry.scores[ids[j]];
+          if (a !== undefined && b !== undefined && a > 2 && b > 2) {
+            const key = ids[i] + '|' + ids[j];
+            coOccurrence[key] = (coOccurrence[key] || 0) + Math.min(a, b) / 10;
+          }
+        }
+      }
+    });
+
+    const maxStrength = Math.max(...Object.values(coOccurrence), 1);
+
+    return Object.entries(coOccurrence)
+      .filter(([, v]) => v > 0.2)
+      .map(([key, val]) => {
+        const [source, target] = key.split('|');
+        return { source, target, strength: val / maxStrength };
+      });
+  }
+
+  render() {
+    const container = this.containerEl.children[1] as HTMLElement;
+    container.empty();
+    container.addClass('wic-net-container');
+
+    // Header with refresh and start fresh
+    const header = container.createDiv('wic-net-header');
+    header.createSpan({ cls: 'wic-net-title', text: 'W.I.C Network' });
+    const headerBtns = header.createDiv('wic-net-header-btns');
+    const freshBtn = headerBtns.createEl('button', { cls: 'wic-net-fresh', text: 'Start fresh' });
+    freshBtn.onclick = () => {
+      new WICConfirmModal(
+        this.app,
+        'This will remove all analysis data. Your writings will not be deleted. Continue?',
+        async () => {
+          try {
+            const filename = await this.plugin.clearAllData();
+            new Notice('Data cleared. Backup saved: ' + filename);
+            this.timeRange = [0, Date.now()];
+            if (this.simulation) this.simulation.stop();
+            this.render();
+          } catch {
+            new Notice('Failed — check console for details');
+          }
+        }
+      ).open();
+    };
+    const refreshBtn = headerBtns.createEl('button', { cls: 'wic-net-refresh', text: '↻' });
+    refreshBtn.setAttribute('aria-label', 'Refresh');
+    refreshBtn.onclick = async () => {
+      await this.plugin.loadWICData();
+      this.timeRange = [0, Date.now()];
+      if (this.simulation) this.simulation.stop();
+      this.render();
+    };
+
+    const entries = this.plugin.wicData.entries;
+    if (entries.length === 0) {
+      container.createDiv({ cls: 'wic-net-empty', text: 'No data yet. Analyse some notes first to see your network.' });
+      return;
+    }
+
+    if (this.timeRange[0] === 0 && this.timeRange[1] >= Date.now() - 1000) {
+      const timestamps = entries.map(e => e.timestamp);
+      this.timeRange = [Math.min(...timestamps), Math.max(...timestamps)];
+    }
+
+    // Filter chips
+    const chipBar = container.createDiv('wic-net-chips');
+    const categories = [...new Set(this.plugin.settings.dimensions.map(d => d.category))];
+    categories.forEach(cat => {
+      const chip = chipBar.createEl('button', { cls: 'wic-net-chip', text: cat });
+      chip.style.borderColor = CAT_COLORS[cat] || '#888';
+      if (this.activeFilters.has(cat)) {
+        chip.addClass('wic-net-chip-active');
+        chip.style.background = CAT_COLORS[cat] || '#888';
+      }
+      chip.onclick = () => {
+        if (this.activeFilters.has(cat)) this.activeFilters.delete(cat);
+        else this.activeFilters.add(cat);
+        this.render();
+      };
+    });
+
+    // SVG container
+    const svgContainer = container.createDiv('wic-net-svg-wrap');
+    const nodes = this.getActiveNodes();
+
+    if (nodes.length === 0) {
+      svgContainer.createDiv({ cls: 'wic-net-empty', text: 'No dimensions above threshold in this time range.' });
+      this.renderScrubber(container);
+      this.renderWritingsPanel(container);
+      return;
+    }
+
+    const nodeIds = new Set(nodes.map(n => n.dim.id));
+    const edges = this.getEdges(nodeIds);
+
+    const width = svgContainer.clientWidth || 800;
+    const height = svgContainer.clientHeight || 500;
+
+    const d3 = this.d3;
+    const svg = d3.select(svgContainer).append('svg')
+      .attr('width', '100%')
+      .attr('height', '100%')
+      .attr('viewBox', `0 0 ${width} ${height}`);
+
+    // Edge lines
+    const linkGroup = svg.append('g');
+    const links = linkGroup.selectAll('line')
+      .data(edges)
+      .enter().append('line')
+      .attr('stroke', 'var(--text-faint)')
+      .attr('stroke-opacity', (d: any) => 0.15 + d.strength * 0.5)
+      .attr('stroke-width', (d: any) => 1 + d.strength * 4);
+
+    // Node groups
+    const nodeGroup = svg.append('g');
+    const maxAvg = Math.max(...nodes.map(n => n.avgScore), 1);
+
+    const nodeEls = nodeGroup.selectAll('g')
+      .data(nodes)
+      .enter().append('g')
+      .attr('cursor', 'pointer')
+      .call(d3.drag()
+        .on('start', (event: any, d: any) => {
+          if (!event.active) this.simulation.alphaTarget(0.3).restart();
+          d.fx = d.x; d.fy = d.y;
+        })
+        .on('drag', (event: any, d: any) => {
+          d.fx = event.x; d.fy = event.y;
+        })
+        .on('end', (event: any, d: any) => {
+          if (!event.active) this.simulation.alphaTarget(0);
+          d.fx = null; d.fy = null;
+        })
+      );
+
+    nodeEls.append('circle')
+      .attr('r', (d: any) => 12 + (d.avgScore / maxAvg) * 28)
+      .attr('fill', (d: any) => CAT_COLORS[d.dim.category] || '#888')
+      .attr('fill-opacity', 0.85)
+      .attr('stroke', (d: any) => CAT_COLORS[d.dim.category] || '#888')
+      .attr('stroke-width', 2)
+      .attr('stroke-opacity', 0.4);
+
+    nodeEls.append('text')
+      .text((d: any) => d.dim.label)
+      .attr('text-anchor', 'middle')
+      .attr('dy', '0.35em')
+      .attr('fill', '#fff')
+      .attr('font-size', (d: any) => {
+        const r = 12 + (d.avgScore / maxAvg) * 28;
+        return Math.max(9, Math.min(14, r * 0.55)) + 'px';
+      })
+      .attr('font-weight', '600')
+      .attr('pointer-events', 'none');
+
+    nodeEls.on('click', (_event: any, d: any) => {
+      this.selectedNode = this.selectedNode === d.dim.id ? null : d.dim.id;
+      this.renderDetail(container, d.dim);
+    });
+
+    // Force simulation
+    const simNodes = nodes.map(n => ({ ...n, x: width / 2 + (Math.random() - 0.5) * 200, y: height / 2 + (Math.random() - 0.5) * 200 }));
+    const simLinks = edges.map(e => ({
+      source: simNodes.find(n => n.dim.id === e.source),
+      target: simNodes.find(n => n.dim.id === e.target),
+      strength: e.strength,
+    })).filter(l => l.source && l.target);
+
+    nodeEls.data(simNodes);
+    links.data(simLinks);
+
+    this.simulation = d3.forceSimulation(simNodes)
+      .force('link', d3.forceLink(simLinks).distance(120).strength((d: any) => d.strength * 0.5))
+      .force('charge', d3.forceManyBody().strength(-300))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collision', d3.forceCollide().radius((d: any) => 16 + (d.avgScore / maxAvg) * 30))
+      .on('tick', () => {
+        links
+          .attr('x1', (d: any) => d.source.x)
+          .attr('y1', (d: any) => d.source.y)
+          .attr('x2', (d: any) => d.target.x)
+          .attr('y2', (d: any) => d.target.y);
+
+        nodeEls.attr('transform', (d: any) => `translate(${d.x},${d.y})`);
+      });
+
+    // Detail panel (empty initially)
+    container.createDiv('wic-net-detail');
+
+    // Timeline scrubber
+    this.renderScrubber(container);
+
+    // Writings inclusion panel
+    this.renderWritingsPanel(container);
+  }
+
+  renderDetail(container: HTMLElement, dim: Dimension) {
+    let detail = container.querySelector('.wic-net-detail') as HTMLElement;
+    if (!detail) {
+      detail = container.createDiv('wic-net-detail');
+    }
+    detail.innerHTML = '';
+
+    if (!this.selectedNode) {
+      detail.style.display = 'none';
+      return;
+    }
+
+    detail.style.display = 'block';
+    const entries = this.getFilteredEntries()
+      .filter(e => e.scores[dim.id] !== undefined && e.scores[dim.id] > 0)
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    const header = detail.createDiv('wic-net-detail-header');
+    header.createSpan({ cls: 'wic-net-detail-title', text: dim.label });
+    header.createSpan({ cls: 'wic-net-detail-cat', text: dim.category });
+    const closeBtn = header.createEl('button', { cls: 'wic-net-detail-close', text: '✕' });
+    closeBtn.onclick = () => { this.selectedNode = null; detail.style.display = 'none'; };
+
+    if (entries.length === 0) {
+      detail.createDiv({ cls: 'wic-net-detail-empty', text: 'No scores recorded.' });
+      return;
+    }
+
+    const list = detail.createDiv('wic-net-detail-list');
+    entries.forEach(entry => {
+      const row = list.createDiv('wic-net-detail-row');
+      row.createSpan({ cls: 'wic-net-detail-note', text: displayName(entry) });
+      row.createSpan({ cls: 'wic-net-detail-score', text: entry.scores[dim.id].toFixed(1) });
+      row.createSpan({ cls: 'wic-net-detail-date', text: new Date(entry.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) });
+    });
+  }
+
+  renderScrubber(container: HTMLElement) {
+    const entries = this.plugin.wicData.entries;
+    if (entries.length < 2) return;
+
+    const timestamps = entries.map(e => e.timestamp);
+    const minT = Math.min(...timestamps);
+    const maxT = Math.max(...timestamps);
+
+    const scrubber = container.createDiv('wic-net-scrubber');
+    scrubber.createSpan({ cls: 'wic-net-scrub-label', text: new Date(this.timeRange[0]).toLocaleDateString() });
+
+    const track = scrubber.createDiv('wic-net-scrub-track');
+    const rangeInput = track.createEl('input');
+    rangeInput.type = 'range';
+    rangeInput.min = String(minT);
+    rangeInput.max = String(maxT);
+    rangeInput.value = String(this.timeRange[0]);
+    rangeInput.addClass('wic-net-scrub-input');
+
+    const rangeInputEnd = track.createEl('input');
+    rangeInputEnd.type = 'range';
+    rangeInputEnd.min = String(minT);
+    rangeInputEnd.max = String(maxT);
+    rangeInputEnd.value = String(this.timeRange[1]);
+    rangeInputEnd.addClass('wic-net-scrub-input');
+
+    scrubber.createSpan({ cls: 'wic-net-scrub-label', text: new Date(this.timeRange[1]).toLocaleDateString() });
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const onScrub = () => {
+      const start = parseInt(rangeInput.value);
+      const end = parseInt(rangeInputEnd.value);
+      this.timeRange = [Math.min(start, end), Math.max(start, end)];
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (this.simulation) this.simulation.stop();
+        this.render();
+      }, 300);
+    };
+
+    rangeInput.addEventListener('input', onScrub);
+    rangeInputEnd.addEventListener('input', onScrub);
+  }
+
+  writingsPanelOpen: boolean = false;
+
+  renderWritingsPanel(container: HTMLElement) {
+    const allEntries = this.plugin.wicData.entries;
+    if (allEntries.length === 0) return;
+
+    const panel = container.createDiv('wic-net-writings');
+
+    const toggle = panel.createDiv('wic-net-writings-toggle');
+    toggle.createSpan({ text: this.writingsPanelOpen ? '▾' : '▸', cls: 'wic-net-writings-arrow' });
+    toggle.createSpan({ text: 'Writings (' + allEntries.length + ')' });
+    toggle.onclick = () => {
+      this.writingsPanelOpen = !this.writingsPanelOpen;
+      const body = panel.querySelector('.wic-net-writings-body') as HTMLElement;
+      if (body) body.style.display = this.writingsPanelOpen ? 'block' : 'none';
+      const arrow = panel.querySelector('.wic-net-writings-arrow') as HTMLElement;
+      if (arrow) arrow.setText(this.writingsPanelOpen ? '▾' : '▸');
+    };
+
+    const body = panel.createDiv('wic-net-writings-body');
+    body.style.display = this.writingsPanelOpen ? 'block' : 'none';
+
+    // Select all / Deselect all
+    const actions = body.createDiv('wic-net-writings-actions');
+    const selectAllBtn = actions.createEl('button', { cls: 'wic-net-writings-action-btn', text: 'Select all' });
+    const deselectAllBtn = actions.createEl('button', { cls: 'wic-net-writings-action-btn', text: 'Deselect all' });
+
+    selectAllBtn.onclick = async () => {
+      allEntries.forEach(e => e.excluded = false);
+      await this.plugin.saveWICData();
+      if (this.simulation) this.simulation.stop();
+      this.render();
+    };
+
+    deselectAllBtn.onclick = async () => {
+      allEntries.forEach(e => e.excluded = true);
+      await this.plugin.saveWICData();
+      if (this.simulation) this.simulation.stop();
+      this.render();
+    };
+
+    const list = body.createDiv('wic-net-writings-list');
+    [...allEntries].sort((a, b) => b.timestamp - a.timestamp).forEach(entry => {
+      const row = list.createDiv('wic-net-writings-row');
+      if (entry.excluded) row.addClass('wic-net-writings-excluded');
+
+      const cb = row.createEl('input') as HTMLInputElement;
+      cb.type = 'checkbox';
+      cb.checked = !entry.excluded;
+      cb.addClass('wic-net-writings-cb');
+      cb.onclick = async (evt) => {
+        evt.stopPropagation();
+        entry.excluded = !cb.checked;
+        await this.plugin.saveWICData();
+        if (this.simulation) this.simulation.stop();
+        this.render();
+      };
+
+      row.createSpan({ cls: 'wic-net-writings-label', text: displayName(entry) });
+      row.createSpan({ cls: 'wic-net-writings-date', text: new Date(entry.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) });
+    });
+  }
+}
+
 export default class WICPlugin extends Plugin {
   settings: WICSettings;
   wicData: WICData = { entries: [], dimensions: [] };
@@ -196,8 +640,10 @@ export default class WICPlugin extends Plugin {
     await this.loadWICData();
 
     this.registerView(WIC_VIEW_TYPE, (leaf) => new WICView(leaf, this));
+    this.registerView(WIC_NETWORK_VIEW_TYPE, (leaf) => new WICNetworkView(leaf, this));
 
     this.addRibbonIcon('brain', 'ExComS W.I.C', () => this.activateView());
+    this.addRibbonIcon('git-fork', 'W.I.C Network', () => this.activateNetworkView());
 
     this.addCommand({
       id: 'analyse-note',
@@ -211,12 +657,19 @@ export default class WICPlugin extends Plugin {
       callback: () => this.activateView(),
     });
 
+    this.addCommand({
+      id: 'open-wic-network',
+      name: 'Open W.I.C Network',
+      callback: () => this.activateNetworkView(),
+    });
+
     this.addSettingTab(new WICSettingTab(this.app, this));
     await this.activateView();
   }
 
   async onunload() {
     this.app.workspace.detachLeavesOfType(WIC_VIEW_TYPE);
+    this.app.workspace.detachLeavesOfType(WIC_NETWORK_VIEW_TYPE);
   }
 
   async activateView() {
@@ -244,6 +697,16 @@ export default class WICPlugin extends Plugin {
     }
   }
 
+  async activateNetworkView() {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(WIC_NETWORK_VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = workspace.getLeaf('tab');
+      await leaf.setViewState({ type: WIC_NETWORK_VIEW_TYPE, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+
   async analyseActiveNote() {
     if (!this.settings.apiKey) { new Notice('Please add your OpenAI API key in W.I.C settings'); return; }
 
@@ -255,9 +718,8 @@ export default class WICPlugin extends Plugin {
 
     try {
       const activeView = activeLeaf.view as any;
-      title = activeView?.file?.basename || activeView?.getDisplayText() || 'Untitled';
-
       const activeFile = activeView?.file || this.app.workspace.getActiveFile();
+      title = activeFile?.basename || activeView?.getDisplayText() || 'Untitled';
       if (activeFile) {
         content = await this.app.vault.read(activeFile);
       } else if (activeView?.editor) {
@@ -369,6 +831,31 @@ export default class WICPlugin extends Plugin {
     return leaf ? (leaf.view as WICView) : null;
   }
 
+  async clearAllData(): Promise<string> {
+    const filename = await this.exportWICData();
+    this.wicData.entries = [];
+    await this.saveWICData();
+    return filename;
+  }
+
+  async exportWICData(): Promise<string> {
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = 'wic-data-backup-' + date + '.json';
+    const raw = JSON.stringify(this.wicData, null, 2);
+    try {
+      const existing = this.app.vault.getAbstractFileByPath(filename);
+      if (existing instanceof TFile) {
+        await this.app.vault.modify(existing, raw);
+      } else {
+        await this.app.vault.create(filename, raw);
+      }
+    } catch (e) {
+      console.error('WIC: export failed', e);
+      throw new Error('Could not save backup file');
+    }
+    return filename;
+  }
+
   async loadSettings() {
     const saved = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
@@ -405,6 +892,31 @@ export default class WICPlugin extends Plugin {
     } catch (e) {
       console.error('WIC: could not save data', e);
     }
+  }
+}
+
+class WICConfirmModal extends Modal {
+  message: string;
+  onConfirm: () => void;
+
+  constructor(app: App, message: string, onConfirm: () => void) {
+    super(app);
+    this.message = message;
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('p', { text: this.message, cls: 'wic-confirm-message' });
+    const btnRow = contentEl.createDiv('wic-confirm-buttons');
+    const cancelBtn = btnRow.createEl('button', { text: 'Cancel' });
+    cancelBtn.onclick = () => this.close();
+    const confirmBtn = btnRow.createEl('button', { text: 'Confirm', cls: 'mod-warning' });
+    confirmBtn.onclick = () => { this.close(); this.onConfirm(); };
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
@@ -474,5 +986,73 @@ class WICSettingTab extends PluginSettingTab {
             this.display();
           }));
     });
+
+    // Data Management
+    containerEl.createEl('h3', { text: 'Data Management' });
+
+    const entryCount = this.plugin.wicData.entries.length;
+
+    new Setting(containerEl)
+      .setName('Export data')
+      .setDesc('Save a dated backup of wic-data.json to your vault root.')
+      .addButton(btn => btn
+        .setButtonText('Export')
+        .onClick(async () => {
+          try {
+            const filename = await this.plugin.exportWICData();
+            new Notice('Backup saved: ' + filename);
+          } catch {
+            new Notice('Export failed — check console for details');
+          }
+        }));
+
+    new Setting(containerEl)
+      .setName('Clear all data')
+      .setDesc('Delete all ' + entryCount + ' entries. Keeps your dimension taxonomy. A backup is saved automatically first.')
+      .addButton(btn => btn
+        .setButtonText('Clear')
+        .setWarning()
+        .onClick(() => {
+          new WICConfirmModal(
+            this.app,
+            'This will delete all ' + entryCount + ' entries from your data. A backup will be saved first. Continue?',
+            async () => {
+              try {
+                const filename = await this.plugin.clearAllData();
+                new Notice('Data cleared. Backup saved: ' + filename);
+                this.display();
+              } catch {
+                new Notice('Failed — check console for details');
+              }
+            }
+          ).open();
+        }));
+
+    new Setting(containerEl)
+      .setName('Full reset')
+      .setDesc('Delete all entries AND reset dimensions to the 18 defaults. A backup is saved automatically first.')
+      .addButton(btn => btn
+        .setButtonText('Reset')
+        .setWarning()
+        .onClick(() => {
+          new WICConfirmModal(
+            this.app,
+            'This will delete all ' + entryCount + ' entries and reset your dimensions to defaults. A backup will be saved first. Continue?',
+            async () => {
+              try {
+                const filename = await this.plugin.exportWICData();
+                this.plugin.wicData.entries = [];
+                this.plugin.wicData.dimensions = [];
+                await this.plugin.saveWICData();
+                this.plugin.settings.dimensions = [...DEFAULT_DIMENSIONS];
+                await this.plugin.saveSettings();
+                new Notice('Full reset complete. Backup saved: ' + filename);
+                this.display();
+              } catch {
+                new Notice('Failed — check console for details');
+              }
+            }
+          ).open();
+        }));
   }
 }

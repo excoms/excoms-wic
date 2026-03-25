@@ -10,6 +10,9 @@ ExComS W.I.C is an Obsidian plugin that analyses your notes, diary entries, and 
 - **Scores your writing** across personalised dimensions — emotions, philosophy, cognition, personality, and more
 - **Tracks trends** over time — see which dimensions are rising, falling, or stable
 - **Detects new dimensions** automatically as your writing evolves
+- **Network visualisation** — a full-screen interactive graph showing how your dimensions relate to each other, powered by D3.js
+- **Writings inclusion panel** — choose which analysed notes are included in the network, with persistent include/exclude state
+- **Data management** — export backups, clear data, or fully reset from settings with automatic safety backups
 - **Saves everything locally** — your data never leaves your vault without your permission
 
 ## How to use
@@ -18,6 +21,26 @@ ExComS W.I.C is an Obsidian plugin that analyses your notes, diary entries, and 
 2. Click the **brain icon** in the left ribbon to open the W.I.C panel
 3. Click **Analyse this note**
 4. Your dimension scores appear instantly in the sidebar
+
+## Network view
+
+Click the **fork icon** in the left ribbon (or use the command "Open W.I.C Network") to open the network visualisation as a full-width tab.
+
+- **Dimension nodes** sized by average score, coloured by category
+- **Edges** show co-occurrence strength — dimensions that score high together are connected
+- **Category filter chips** at the top to show/hide EMO, PHIL, COG, PERS, or BRAIN
+- **Click any node** to see its score history across all analysed notes
+- **Timeline scrubber** at the bottom to filter the graph by date range
+- **Writings panel** — expand to see all analysed notes with checkboxes; uncheck a note to exclude it from the network. State persists in wic-data.json
+- **Include in network toggle** in the sidebar panel to quickly include or exclude the current note
+
+## Data management
+
+Found in Settings → ExComS W.I.C under the Data Management section:
+
+- **Export data** — saves a dated backup of wic-data.json to your vault root
+- **Clear all data** — deletes all entries but keeps your dimension taxonomy. A backup is saved automatically before clearing
+- **Full reset** — deletes all entries and resets dimensions to the 18 defaults. A backup is saved automatically before resetting
 
 ## Setup
 
